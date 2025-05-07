@@ -1,0 +1,141 @@
+CODING:
+import streamlit as st
+import librosa
+import matplotlib.pyplot as plt
+import numpy as np
+import soundfile as sf
+import io
+import torch
+import base64
+from denoising_model import DenoisingAutoencoder
+from classification_model import HeartDiseaseClassifier
+
+# Set page title and layout
+st.set_page_config(page_title="Heart Sound Denoising & Diagnosis", layout="wide")
+
+# Background styling
+def get_base64_image(path):
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode()
+
+bg_image = get_base64_image("static/black-heartbeat.webp")
+st.markdown(f"""
+    <style>
+        .stApp {{
+            background-image: url("data:image/jpg;base64,{bg_image}");
+            background-size: cover;
+            color: white;
+        }}
+    </style>
+""", unsafe_allow_html=True)
+
+# App title
+st.title("💓 Heart Sound Denoising & Disease Detection")
+
+# Upload
+uploaded_file = st.file_uploader("Upload Heart Sound (.wav)", type=["wav"])
+
+
+# Load models
+denoise_model = DenoisingAutoencoder()
+denoise_model.load_state_dict(torch.load("model.pth", map_location="cpu"))
+denoise_model.eval()
+
+clf_model = HeartDiseaseClassifier()
+torch.save(clf_model.state_dict(), "classifier.pth")
+clf_model.load_state_dict(torch.load("classifier.pth", map_location="cpu"))
+
+clf_model.eval()
+
+# Class labels
+class_names = {
+    0: "Normal",
+    1: "Aortic Stenosis",
+    2: "Mitral Regurgitation",
+    3: "Mitral Valve Prolapse",
+    4: "Other Abnormality"
+}
+
+# Main processing
+if uploaded_file:
+    # Load audio
+    audio, sr = librosa.load(uploaded_file, sr=4000)
+    original_audio = audio.copy()
+
+    # Pad to chunk size
+    chunk_size = 4000
+    num_chunks = int(np.ceil(len(audio) / chunk_size))
+    audio = np.pad(audio, (0, num_chunks * chunk_size - len(audio)), 'constant')
+
+    # Denoising
+    denoised_audio = []
+    for i in range(num_chunks):
+        chunk = audio[i * chunk_size:(i + 1) * chunk_size]
+        input_tensor = torch.tensor(chunk).unsqueeze(0).unsqueeze(0).float()
+        with torch.no_grad():
+            denoised_chunk = denoise_model(input_tensor).squeeze().numpy()
+        denoised_audio.extend(denoised_chunk)
+    denoised_audio = np.array(denoised_audio)
+
+    # Audio Players
+    st.subheader("🔊 Original")
+    orig_buf = io.BytesIO()
+    sf.write(orig_buf, original_audio, sr, format='WAV')
+    st.audio(orig_buf, format='audio/wav')
+
+    st.subheader("🔊 Denoised")
+    den_buf = io.BytesIO()
+    sf.write(den_buf, denoised_audio, sr, format='WAV')
+    st.audio(den_buf, format='audio/wav')
+
+    # Waveform Visualization
+    st.subheader("📊 Waveform Comparison")
+    fig, ax = plt.subplots(2, 1, figsize=(10, 4))
+    ax[0].plot(original_audio)
+    ax[0].set_title("Original Audio")
+    ax[1].plot(denoised_audio[:len(original_audio)])
+    ax[1].set_title("Denoised Audio")
+    st.pyplot(fig)
+
+    # Classification using full audio (chunk-wise)
+    st.subheader("🩺 Disease Prediction")
+    clf_inputs = []
+    for i in range(num_chunks):
+        chunk = denoised_audio[i * chunk_size:(i + 1) * chunk_size]
+        tensor_chunk = torch.tensor(chunk).unsqueeze(0).float()  # (1, 4000)
+        clf_inputs.append(tensor_chunk)
+
+    clf_inputs = torch.cat(clf_inputs, dim=0)  # shape: (N, 4000)
+    with torch.no_grad():
+        outputs = clf_model(clf_inputs)  # shape: (N, num_classes)
+        avg_output = torch.mean(outputs, dim=0)  # average across chunks
+        predicted_class = torch.argmax(avg_output).item()
+
+    disease_name = class_names[predicted_class]
+    if predicted_class == 0:
+        st.success(f"✅ *Prediction: {disease_name}*")
+    else:
+        st.error(f"⚠ *Prediction: {disease_name}*")
+
+    # Show confidence scores
+    st.subheader("📈 Confidence Scores")
+    probabilities = torch.nn.functional.softmax(avg_output, dim=0).numpy()
+    for i, prob in enumerate(probabilities):
+        st.write(f"{class_names[i]}: {prob:.2%}")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
